@@ -1,0 +1,138 @@
+services:
+  # =========================================================================
+  # PostgreSQL Database
+  # =========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: soydecision-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-soydecision}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-soydecision}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
+  # Redis Cache & Message Broker
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: soydecision-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
+  # Qdrant Vector Database (Market & WASDE Intelligence)
+  # =========================================================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: soydecision-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # =========================================================================
+  # FastAPI Math Core & REST Backend
+  # =========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soydecision-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=True
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-soydecision}
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - DEFAULT_LLM_PROVIDER=${DEFAULT_LLM_PROVIDER:-gemini}
+      - DEFAULT_MODEL_NAME=${DEFAULT_MODEL_NAME:-gemini-2.5-flash}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+
+  # =========================================================================
+  # LangGraph Agent Layer
+  # =========================================================================
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: soydecision-agent
+    restart: unless-stopped
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - DEFAULT_LLM_PROVIDER=${DEFAULT_LLM_PROVIDER:-gemini}
+      - DEFAULT_MODEL_NAME=${DEFAULT_MODEL_NAME:-gemini-2.5-flash}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - BACKEND_API_URL=http://backend:8000/api/v1
+    depends_on:
+      - backend
+      - qdrant
+    volumes:
+      - ./agent:/app
+
+  # =========================================================================
+  # Next.js 15 App Router Frontend
+  # =========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: soydecision-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+      - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-pk_test_placeholder}
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY:-sk_test_placeholder}
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+
